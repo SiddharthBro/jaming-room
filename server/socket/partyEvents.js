@@ -1,5 +1,5 @@
 /**
- * Party Socket Events Handler
+ * Party Socket Events Handler with YouTube Sync
  */
 const partyController = require('../controllers/partyController');
 const chatController = require('../controllers/chatController');
@@ -129,11 +129,12 @@ module.exports = (io, socket) => {
   });
 
   /**
-   * Play Music Event
+   * Play YouTube Music Event
+   * Sends server timestamp for synchronized playback
    */
-  socket.on('play-music', (data, callback) => {
+  socket.on('play-youtube', (data, callback) => {
     try {
-      const { partyId, track } = data;
+      const { partyId, youtubeUrl, videoTitle, videoDuration, videoId } = data;
 
       // Only host can play music
       if (!partyController.isHost(partyId, socket.userId)) {
@@ -143,20 +144,39 @@ module.exports = (io, socket) => {
         });
       }
 
+      const track = {
+        type: 'youtube',
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        title: videoTitle,
+        duration: videoDuration,
+        addedBy: socket.username
+      };
+
       partyController.updateCurrentTrack(partyId, track);
       partyController.updatePlayingState(partyId, true);
 
-      io.to(`party_${partyId}`).emit('music-playing', {
-        track: track,
-        timestamp: Date.now()
+      // Server timestamp for perfect sync
+      const serverTimestamp = Date.now();
+
+      // Broadcast to all party members with server timestamp
+      io.to(`party_${partyId}`).emit('youtube-play', {
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        videoTitle: videoTitle,
+        videoDuration: videoDuration,
+        serverTimestamp: serverTimestamp,
+        hostId: socket.userId,
+        currentTime: 0
       });
 
       callback({
         success: true,
-        message: 'Music started'
+        message: 'YouTube video started',
+        serverTimestamp: serverTimestamp
       });
 
-      console.log(`Music playing in party ${partyId}: ${track.title}`);
+      console.log(`YouTube playing in party ${partyId}: ${videoTitle}`);
     } catch (error) {
       callback({
         success: false,
@@ -166,11 +186,11 @@ module.exports = (io, socket) => {
   });
 
   /**
-   * Pause Music Event
+   * Pause YouTube Event
    */
-  socket.on('pause-music', (data, callback) => {
+  socket.on('pause-youtube', (data, callback) => {
     try {
-      const { partyId } = data;
+      const { partyId, currentTime } = data;
 
       // Only host can pause music
       if (!partyController.isHost(partyId, socket.userId)) {
@@ -182,16 +202,21 @@ module.exports = (io, socket) => {
 
       partyController.updatePlayingState(partyId, false);
 
-      io.to(`party_${partyId}`).emit('music-paused', {
-        timestamp: Date.now()
+      const serverTimestamp = Date.now();
+
+      // Broadcast pause to all party members
+      io.to(`party_${partyId}`).emit('youtube-paused', {
+        currentTime: currentTime,
+        serverTimestamp: serverTimestamp,
+        pausedAt: currentTime
       });
 
       callback({
         success: true,
-        message: 'Music paused'
+        message: 'YouTube video paused'
       });
 
-      console.log(`Music paused in party ${partyId}`);
+      console.log(`YouTube paused in party ${partyId} at ${currentTime}s`);
     } catch (error) {
       callback({
         success: false,
@@ -201,15 +226,59 @@ module.exports = (io, socket) => {
   });
 
   /**
-   * Sync Music Time Event
+   * Resume YouTube Event
    */
-  socket.on('sync-music-time', (data, callback) => {
+  socket.on('resume-youtube', (data, callback) => {
     try {
       const { partyId, currentTime } = data;
 
-      io.to(`party_${partyId}`).emit('music-time-sync', {
+      // Only host can resume music
+      if (!partyController.isHost(partyId, socket.userId)) {
+        return callback({
+          success: false,
+          message: 'Only host can control playback'
+        });
+      }
+
+      partyController.updatePlayingState(partyId, true);
+
+      const serverTimestamp = Date.now();
+
+      // Broadcast resume to all party members
+      io.to(`party_${partyId}`).emit('youtube-resumed', {
         currentTime: currentTime,
-        timestamp: Date.now()
+        serverTimestamp: serverTimestamp
+      });
+
+      callback({
+        success: true,
+        message: 'YouTube video resumed'
+      });
+
+      console.log(`YouTube resumed in party ${partyId}`);
+    } catch (error) {
+      callback({
+        success: false,
+        message: error.message
+      });
+    }
+  });
+
+  /**
+   * Sync YouTube Time - Critical for perfect synchronization
+   * Host sends periodic time updates to keep all clients in sync
+   */
+  socket.on('sync-youtube-time', (data, callback) => {
+    try {
+      const { partyId, currentTime } = data;
+
+      const serverTimestamp = Date.now();
+
+      // Broadcast time sync to all party members
+      io.to(`party_${partyId}`).emit('youtube-time-sync', {
+        currentTime: currentTime,
+        serverTimestamp: serverTimestamp,
+        tolerance: 500 // Tolerance in milliseconds (±0.5 seconds)
       });
 
       callback({
@@ -225,11 +294,109 @@ module.exports = (io, socket) => {
   });
 
   /**
+   * Seek YouTube - Host seeks to specific position
+   */
+  socket.on('seek-youtube', (data, callback) => {
+    try {
+      const { partyId, seekTime } = data;
+
+      // Only host can seek
+      if (!partyController.isHost(partyId, socket.userId)) {
+        return callback({
+          success: false,
+          message: 'Only host can seek'
+        });
+      }
+
+      const serverTimestamp = Date.now();
+
+      // Broadcast seek to all party members
+      io.to(`party_${partyId}`).emit('youtube-seek', {
+        seekTime: seekTime,
+        serverTimestamp: serverTimestamp
+      });
+
+      callback({
+        success: true,
+        message: 'Seeked to ' + seekTime + 's'
+      });
+
+      console.log(`YouTube seeked in party ${partyId} to ${seekTime}s`);
+    } catch (error) {
+      callback({
+        success: false,
+        message: error.message
+      });
+    }
+  });
+
+  /**
+   * Change YouTube Video - Host changes to next/previous video
+   */
+  socket.on('change-youtube-video', (data, callback) => {
+    try {
+      const { partyId, youtubeUrl, videoTitle, videoDuration, videoId } = data;
+
+      // Only host can change video
+      if (!partyController.isHost(partyId, socket.userId)) {
+        return callback({
+          success: false,
+          message: 'Only host can change video'
+        });
+      }
+
+      const track = {
+        type: 'youtube',
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        title: videoTitle,
+        duration: videoDuration,
+        addedBy: socket.username
+      };
+
+      partyController.updateCurrentTrack(partyId, track);
+
+      const serverTimestamp = Date.now();
+
+      // Broadcast video change to all party members
+      io.to(`party_${partyId}`).emit('youtube-video-changed', {
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        videoTitle: videoTitle,
+        videoDuration: videoDuration,
+        serverTimestamp: serverTimestamp,
+        currentTime: 0
+      });
+
+      callback({
+        success: true,
+        message: 'Video changed'
+      });
+
+      console.log(`YouTube video changed in party ${partyId}: ${videoTitle}`);
+    } catch (error) {
+      callback({
+        success: false,
+        message: error.message
+      });
+    }
+  });
+
+  /**
    * Add to Playlist
    */
   socket.on('add-to-playlist', (data, callback) => {
     try {
-      const { partyId, track } = data;
+      const { partyId, youtubeUrl, videoTitle, videoDuration, videoId } = data;
+
+      const track = {
+        type: 'youtube',
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        title: videoTitle,
+        duration: videoDuration,
+        addedBy: socket.username
+      };
 
       partyController.addToPlaylist(partyId, track);
 
@@ -243,7 +410,7 @@ module.exports = (io, socket) => {
         message: 'Track added to playlist'
       });
 
-      console.log(`Track added to playlist in party ${partyId}: ${track.title}`);
+      console.log(`Track added to playlist in party ${partyId}: ${videoTitle}`);
     } catch (error) {
       callback({
         success: false,
